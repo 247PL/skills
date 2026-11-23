@@ -1,6 +1,6 @@
-# Optional Audit Modules
+# Scope-Specific Audit Procedures
 
-Run only the modules explicitly requested by the user. Pair manual inspection with the deterministic probes in [browser-probes.md](./browser-probes.md).
+Run procedures matching the selected scope, explicit or inferred from a symptom. Full audits include all applicable scopes; quick/deep/re-audit controls depth. Pair manual inspection with the deterministic probes in [browser-probes.md](./browser-probes.md).
 
 ## Module 1: Performance (`performance`)
 

@@ -1,25 +1,42 @@
 ---
 name: website-qa-audit
-description: >-
-  Runs a live QA, UX/UI, visual, copywriting, contact/legal, and technical/SEO
-  audit of any website in a real browser across desktop, laptop/tablet, and
-  mobile viewports. Supports three modes (quick, deep, re-audit), deterministic
-  browser JS probes, regional packs (e.g. PL/EU), four optional modules (Core
-  Web Vitals / image weights, WCAG accessibility, GDPR/cookies, passive
-  security), and Markdown/HTML report export. Use whenever the user asks to
-  review a website, find bugs on a URL, run a pre-launch QA check, re-audit
-  fixes, or inspect UX, copy, and technical health (e.g. "review this site",
-  "find bugs on this URL", "re-audit fixes", "przejrzyj tę stronę", "wyłap
-  błędy", "sprawdź poprawki").
+description: Use when auditing websites or diagnosing their bugs.
 ---
 
 # Website QA & UX Audit
 
 Inspect a live website in a real browser across desktop, intermediate laptop/tablet, and mobile viewports using deterministic DOM probes and manual visual checks, then deliver an evidence-backed report grouped by priority.
 
+## Scope and Mode
+
+Choose **scope** (what to inspect) independently from **mode** (how deeply to inspect it). Client handoff versus internal use does not define either axis.
+
+Infer scope from the request; do not require special syntax or ask when intent is clear. Combine scopes or narrow them to a page, component, device, or symptom. Unrestricted reviews default to **full audit**; a specific symptom selects only its relevant scope.
+
+| Scope | Coverage |
+|---|---|
+| Full audit | All applicable scopes below; state omissions and blockers. |
+| UI/UX and responsiveness | Hierarchy, layout, usability, responsive behavior, empty/loading/error/success states. |
+| Functionality | Links, navigation, forms, search, filters, accounts, cart, user paths; no production data mutation. |
+| Performance | Server response, waterfall, cache/compression, render blocking, images, scripts, lab/field metrics. |
+| Accessibility | Semantics, keyboard/focus, labels, contrast; automated checks do not prove full WCAG compliance. |
+| Content and consistency | Copy errors, clarity, missing content, language variants, company/contact consistency. |
+| Technical SEO | Indexability, status codes, metadata, headings, canonical/hreflang, structured data, sitemap/robots. |
+| Privacy and cookies | Consent, pre/post-consent tracking, preferences, observable policy consistency; not legal certification. |
+| Passive security | HTTPS, mixed content, headers, observable disclosures; no exploitation or active scanning. |
+
+Examples:
+- "Why is this site slow?" → **deep / performance**.
+- "Check the site quickly" → **quick / full audit**.
+- "Audit this site" → **deep / full audit**.
+- "Check the mobile contact form" → **quick / functionality + UI/UX**, limited to that form on mobile; deepen if needed to diagnose a failure.
+- "Verify the fixes" → **re-audit / previous findings and their scopes**.
+
+State mode, scope, and page/device sample in the report. Omit irrelevant checklist sections and unrelated pages from focused investigations. Record incidental serious findings separately without silently expanding scope.
+
 ## Modes
 
-Choose the mode based on the user's request. Default to **`deep`** for full review requests unless the user asks for a fast triage or supplies a prior report for re-verification.
+Keep **`quick`**, **`deep`**, and **`re-audit`**: they control depth **within scope**. Default to **`deep`** unless fast triage or fix verification is requested. Page and viewport lists below are defaults for full audits; for narrower scopes, sample only relevant pages, templates, and viewports.
 
 ### 1. Quick Mode (`quick`)
 Fast triage for smoke checks or rapid reviews:
@@ -39,9 +56,9 @@ Fix verification after a previous audit:
 - **Workflow**: Re-verify each previously reported finding in the live browser using the same viewports and probes, plus a quick regression scan of surrounding areas.
 - **Output**: A status table (`FIXED`, `OPEN`, `PARTIAL`, `REGRESSION`) with verification notes for every original item, followed by any newly discovered issues.
 
-## Optional Modules
+## Scope-Specific Procedures
 
-Run these only when requested by the user (e.g. "deep audit + WCAG and performance", "sprawdź też RODO i wagi zdjęć"). Full criteria are in [references/optional-modules.md](./references/optional-modules.md):
+Run procedures matching the selected scope, explicit or inferred from the symptom. Full audits include all applicable scopes at the selected depth. Detailed criteria for the following scopes are in [references/optional-modules.md](./references/optional-modules.md):
 
 - **Performance (`performance`)** — Core Web Vitals (LCP, CLS, INP/responsiveness), image transfer weights & oversizing (`Probe 3`, `Probe 7`), lazy-loaded hero images, render-blocking resources.
 - **Accessibility (`wcag`)** — WCAG 2.1 AA essentials: text/UI contrast, keyboard navigation & visible focus states, landmarks/headings hierarchy, ARIA labels, icon-only button labels, form labels, alt text (`Probe 1`, `Probe 7` + manual tabbing).
@@ -54,10 +71,12 @@ Run these only when requested by the user (e.g. "deep audit + WCAG and performan
    - Inspect the live rendered site using your browser tool or browser subagent (e.g. Playwright MCP, Chrome DevTools MCP, or your agent's built-in browser tool/subagent).
    - Do **not** substitute `curl`, `wget`, or raw HTML scraping for live rendering and visual inspection.
    - Never bypass CAPTCHAs, login walls, or origin blocks; if blocked or unreachable, report it clearly and stop.
-2. **Run Deterministic JS Probes**:
+2. **Reproduce and Gather Evidence Within Scope**:
+   - For a reported error, reproduce it and record URL, viewport, steps, expected behavior, and actual behavior. Separate confirmed causes from hypotheses; use focused comparisons before recommending fixes.
+   - Run only probes relevant to scope.
    - Execute the relevant snippets from [references/browser-probes.md](./references/browser-probes.md) in the browser context to gather exact JSON facts (SEO/robots, `mailto:`/`tel:` mismatches, image weights/broken tags, overflow/clipped selectors, NIP/REGON/KRS checksums, pre-consent trackers) instead of guessing from visual scans alone.
 3. **Apply Regional Rules When Applicable**:
-   - When auditing Polish or EU websites, automatically apply [references/regional/pl-eu.md](./references/regional/pl-eu.md).
+   - When scope includes regional/legal checks on Polish or EU websites, apply [references/regional/pl-eu.md](./references/regional/pl-eu.md).
 4. **Capture Evidence Screenshots**:
    - Capture screenshots of notable visual/UX defects (e.g. unreadable hero contrast, clipped mobile filter pills, wrapping intermediate-viewport navbars, opaque logo boxes) and cite only screenshot paths verified by your runtime environment.
 5. **Never Create Spam or Mutate Production Data**:
@@ -65,7 +84,7 @@ Run these only when requested by the user (e.g. "deep audit + WCAG and performan
 
 ## Report Format & Export
 
-- **Default Output**: Respond concisely in the **user's language**, grouped by priority (`Critical`, `UI/UX & Visual`, `Content & Copy`, `Technical & SEO`, requested `Optional Modules`, `Quick Wins / Developer Checklist`, and `What Works Well`). Quote exact faulty text, URLs, viewports, and CSS selectors where useful.
+- **Default Output**: Respond concisely in the **user's language**, grouped by priority (`Critical`, `UI/UX & Visual`, `Content & Copy`, `Technical & SEO`, selected scope-specific findings, `Quick Wins / Developer Checklist`, and `What Works Well`). Quote exact faulty text, URLs, viewports, and CSS selectors where useful.
 - **File Export (on request)**: When the user asks for a shareable file, save either:
   - Markdown report (`audit-<domain>-<yyyy-mm-dd>.md`) using [templates/report-template.md](./templates/report-template.md), or
   - Standalone, print-ready HTML client report (`audit-<domain>-<yyyy-mm-dd>.html`) using [templates/report-template.html](./templates/report-template.html).

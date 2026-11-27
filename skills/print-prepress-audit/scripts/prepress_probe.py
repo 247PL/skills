@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
-Deterministic Prepress, Post-RIP & Spot-UV Audit Probe (print-prepress-audit)
+Deterministic Prepress, Post-RIP & Spot-UV Audit Probe (print-prepress-audit v1.1)
 Requires: pymupdf (fitz), Pillow, numpy
 
 Subcommands:
-  inspect       Inspect PDF page boxes (mm/pt), fonts, image DPI/colorspace, and safe-margin collisions.
+  inspect       Inspect one or more PDFs (or an entire folder) for page boxes (mm/pt), visual pixel bleed,
+                OutputIntents/PDF-X, AI private PieceInfo data, fonts/outlined text, image DPI/CMYK,
+                vector RGB/K100 fills, safe-margin collisions, and batch consistency across a series.
   uv-align      Verify exact vector coordinate alignment (0.0000 pt) between a CMYK cover PDF and a spot UV mask PDF.
-  diff-pdfs     Compare two PDFs page-by-page (e.g. source srodek.pdf vs screen-RIP srodek.pdf) for visual differences.
+  diff-pdfs     Compare two PDFs page-by-page (supports --clip-trimbox for comparing files with/without crop marks).
   diff-split    Verify that a combined PDF (wszystko.pdf) matches split cover (okladka.pdf) + inside (srodek.pdf).
   match-pages   Deterministically match imposed RIP spread halves against source pages (identifies Side 1A vs 1B).
   uv-overlay    Generate a visual verification PDF overlaying a UV mask in glowing magenta onto a CMYK cover/RIP sheet.
 """
 
 import argparse
+import datetime
+import glob
 import io
 import json
 import os
+import re
 import sys
 
 # Force UTF-8 stdout/stderr on Windows to prevent cp1250 crashes on ligatures (\ufb01, \ufb02)
@@ -35,35 +40,101 @@ import numpy as np
 PT_TO_MM = 25.4 / 72.0
 
 
-def rect_to_mm(rect):
-    return [
-        round(rect.x0 * PT_TO_MM, 2),
-        round(rect.y0 * PT_TO_MM, 2),
-        round(rect.x1 * PT_TO_MM, 2),
-        round(rect.y1 * PT_TO_MM, 2),
-        round(rect.width * PT_TO_MM, 2),
-        round(rect.height * PT_TO_MM, 2),
+def check_visual_bleed(page, dpi=120):
+    """Sample pixels 1.5mm outside vs 1.5mm inside TrimBox on all 4 edges to detect clipped/white bleeds."""
+    trim = page.trimbox
+    media = page.mediabox
+    margin_l = (trim.x0 - media.x0) * PT_TO_MM
+    margin_t = (trim.y0 - media.y0) * PT_TO_MM
+    margin_r = (media.x1 - trim.x1) * PT_TO_MM
+    margin_b = (media.y1 - trim.y1) * PT_TO_MM
+
+    if min(margin_l, margin_t, margin_r, margin_b) < 1.5:
+        return {
+            "checked": False,
+            "reason": "MediaBox has less than 1.5 mm area outside TrimBox",
+            "empty_white_bleed_suspected": False,
+        }
+
+    s = dpi / 72.0
+    pix = page.get_pixmap(dpi=dpi)
+    arr = np.array(Image.frombytes("RGB", [pix.width, pix.height], pix.samples))
+    h, w = arr.shape[:2]
+
+    tx0, ty0, tx1, ty1 = int(trim.x0 * s), int(trim.y0 * s), int(trim.x1 * s), int(trim.y1 * s)
+    off = max(2, int(1.5 / PT_TO_MM * s))
+    mid_x = max(20, min(w - 20, (tx0 + tx1) // 2))
+    mid_y = max(20, min(h - 20, (ty0 + ty1) // 2))
+    span = min(40, max(5, (tx1 - tx0) // 6))
+
+    def mean_patch(y0, y1, x0, x1):
+        y0, y1 = max(0, min(h - 1, y0)), max(1, min(h, y1))
+        x0, x1 = max(0, min(w - 1, x0)), max(1, min(w, x1))
+        if y1 <= y0 or x1 <= x0:
+            return 255.0
+        return round(float(arr[y0:y1, x0:x1].mean()), 1)
+
+    outside = {
+        "top": mean_patch(ty0 - off - 2, ty0 - off + 2, mid_x - span, mid_x + span),
+        "bottom": mean_patch(ty1 + off - 2, ty1 + off + 2, mid_x - span, mid_x + span),
+        "left": mean_patch(mid_y - span, mid_y + span, tx0 - off - 2, tx0 - off + 2),
+        "right": mean_patch(mid_y - span, mid_y + span, tx1 + off - 2, tx1 + off + 2),
+    }
+    inside = {
+        "top": mean_patch(ty0 + off, ty0 + off + 4, mid_x - span, mid_x + span),
+        "bottom": mean_patch(ty1 - off - 4, ty1 - off, mid_x - span, mid_x + span),
+        "left": mean_patch(mid_y - span, mid_y + span, tx0 + off, tx0 + off + 4),
+        "right": mean_patch(mid_y - span, mid_y + span, tx1 - off - 4, tx1 - off),
+    }
+
+    clipped_edges = [
+        side for side in ("top", "bottom", "left", "right")
+        if inside[side] < 245.0 and outside[side] >= 252.0
     ]
 
+    return {
+        "checked": True,
+        "outside_1_5mm_brightness": outside,
+        "inside_1_5mm_brightness": inside,
+        "clipped_edges": clipped_edges,
+        "empty_white_bleed_suspected": len(clipped_edges) > 0,
+    }
 
-def cmd_inspect(args):
-    doc = fitz.open(args.pdf)
-    safe_pt = args.safe_mm / PT_TO_MM
+
+def inspect_single_pdf(pdf_path, safe_mm=3.5, min_dpi=250.0, visual_bleed=True):
+    st = os.stat(pdf_path)
+    mtime = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    doc = fitz.open(pdf_path)
+    safe_pt = safe_mm / PT_TO_MM
+
+    cat_str = doc.xref_object(doc.pdf_catalog())
+    has_output_intent = "/OutputIntents" in cat_str
+    has_ai_private = ("/PieceInfo" in cat_str) or ("/Illustrator" in cat_str)
+
     report = {
-        "file": os.path.abspath(args.pdf),
-        "size_bytes": os.path.getsize(args.pdf),
+        "file": os.path.abspath(pdf_path),
+        "filename": os.path.basename(pdf_path),
+        "size_bytes": st.st_size,
+        "mtime": mtime,
+        "pdf_version": doc.metadata.get("format", ""),
+        "creator": doc.metadata.get("creator", ""),
+        "has_output_intent": has_output_intent,
+        "has_ai_private_data": has_ai_private,
         "page_count": len(doc),
         "divisible_by_4": (len(doc) % 4 == 0),
         "pages": [],
     }
 
     for i, page in enumerate(doc):
+        if not report["has_ai_private_data"]:
+            pg_str = doc.xref_object(page.xref)
+            if "/PieceInfo" in pg_str or "/Illustrator" in pg_str:
+                report["has_ai_private_data"] = True
+
         media = page.mediabox
-        crop = page.cropbox
         trim = page.trimbox
         bleed = page.bleedbox
 
-        # Calculate bleed around TrimBox in mm
         bleeds_mm = {
             "left": round((trim.x0 - bleed.x0) * PT_TO_MM, 2),
             "top": round((trim.y0 - bleed.y0) * PT_TO_MM, 2),
@@ -71,10 +142,8 @@ def cmd_inspect(args):
             "bottom": round((bleed.y1 - trim.y1) * PT_TO_MM, 2),
         }
 
-        # Fonts
         fonts = []
         for f in page.get_fonts():
-            # f: (xref, ext, type, basefont, name, encoding)
             fonts.append(
                 {
                     "xref": f[0],
@@ -85,7 +154,6 @@ def cmd_inspect(args):
                 }
             )
 
-        # Images & effective DPI
         images = []
         for img_info in page.get_images(full=True):
             xref = img_info[0]
@@ -106,12 +174,20 @@ def cmd_inspect(args):
                         "colorspace": cs_name,
                         "dpi_x": dpi_x,
                         "dpi_y": dpi_y,
-                        "low_dpi": min(dpi_x, dpi_y) < args.min_dpi,
+                        "low_dpi": min(dpi_x, dpi_y) < min_dpi,
                         "non_cmyk": cs_name not in ("DeviceCMYK", "Separation", "DeviceN", "Indexed"),
                     }
                 )
 
-        # Safe margin collisions for text blocks inside TrimBox
+        stream = page.read_contents().decode("latin1", errors="ignore")
+        cmyk_fills = sorted(set(re.findall(r"([0-9.]+ [0-9.]+ [0-9.]+ [0-9.]+) k", stream)))
+        rgb_fills = sorted(set(re.findall(r"([0-9.]+ [0-9.]+ [0-9.]+) rg", stream)))
+        has_k100 = ("0 0 0 1" in cmyk_fills) or ("0 0 0 1 K" in stream)
+
+        full_text = page.get_text().strip()
+        drawings_count = len(page.get_drawings())
+        text_outlined = (len(fonts) == 0) and (len(full_text) == 0) and (drawings_count > 10)
+
         safe_rect = fitz.Rect(
             trim.x0 + safe_pt,
             trim.y0 + safe_pt,
@@ -120,14 +196,11 @@ def cmd_inspect(args):
         )
         margin_warnings = []
         for b in page.get_text("blocks"):
-            if b[6] != 0:  # skip image blocks
+            if b[6] != 0:
                 continue
             r = fitz.Rect(b[:4])
             txt = b[4].strip().replace("\n", " ")
-            if not txt:
-                continue
-            # Ignore printer slug text outside TrimBox
-            if not r.intersects(trim):
+            if not txt or not r.intersects(trim):
                 continue
             if (
                 r.x0 < safe_rect.x0
@@ -148,33 +221,116 @@ def cmd_inspect(args):
                     }
                 )
 
-        report["pages"].append(
-            {
-                "page": i + 1,
-                "trim_size_mm": [
-                    round(trim.width * PT_TO_MM, 2),
-                    round(trim.height * PT_TO_MM, 2),
-                ],
-                "bleed_size_mm": [
-                    round(bleed.width * PT_TO_MM, 2),
-                    round(bleed.height * PT_TO_MM, 2),
-                ],
-                "media_size_mm": [
-                    round(media.width * PT_TO_MM, 2),
-                    round(media.height * PT_TO_MM, 2),
-                ],
-                "bleeds_mm": bleeds_mm,
-                "fonts_count": len(fonts),
-                "unembedded_fonts": [f["basefont"] for f in fonts if not f["embedded"]],
-                "images_count": len(images),
-                "low_dpi_images": [img for img in images if img["low_dpi"]],
-                "non_cmyk_images": [img for img in images if img["non_cmyk"]],
-                "drawings_count": len(page.get_drawings()),
-                "margin_warnings": margin_warnings,
-            }
-        )
+        page_entry = {
+            "page": i + 1,
+            "trim_size_mm": [
+                round(trim.width * PT_TO_MM, 2),
+                round(trim.height * PT_TO_MM, 2),
+            ],
+            "bleed_size_mm": [
+                round(bleed.width * PT_TO_MM, 2),
+                round(bleed.height * PT_TO_MM, 2),
+            ],
+            "media_size_mm": [
+                round(media.width * PT_TO_MM, 2),
+                round(media.height * PT_TO_MM, 2),
+            ],
+            "bleeds_mm": bleeds_mm,
+            "fonts_count": len(fonts),
+            "unembedded_fonts": [f["basefont"] for f in fonts if not f["embedded"]],
+            "text_length": len(full_text),
+            "text_outlined": text_outlined,
+            "images_count": len(images),
+            "low_dpi_images": [img for img in images if img["low_dpi"]],
+            "non_cmyk_images": [img for img in images if img["non_cmyk"]],
+            "drawings_count": drawings_count,
+            "has_k100": has_k100,
+            "vector_rgb_fills_count": len(rgb_fills),
+            "margin_warnings": margin_warnings,
+        }
 
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+        if visual_bleed:
+            page_entry["visual_bleed_check"] = check_visual_bleed(page)
+
+        report["pages"].append(page_entry)
+
+    return report
+
+
+def cmd_inspect(args):
+    pdf_paths = []
+    for target in args.targets:
+        if os.path.isdir(target):
+            pdf_paths.extend(sorted(glob.glob(os.path.join(target, "*.pdf"))))
+        elif os.path.isfile(target):
+            pdf_paths.append(target)
+        else:
+            pdf_paths.extend(sorted(glob.glob(target)))
+
+    if not pdf_paths:
+        print(json.dumps({"error": "No PDF files found for given target(s)."}, ensure_ascii=False))
+        sys.exit(1)
+
+    if len(pdf_paths) == 1:
+        rep = inspect_single_pdf(
+            pdf_paths[0],
+            safe_mm=args.safe_mm,
+            min_dpi=args.min_dpi,
+            visual_bleed=not args.no_visual_bleed,
+        )
+        print(json.dumps(rep, ensure_ascii=False, indent=2))
+        return
+
+    reports = [
+        inspect_single_pdf(
+            p,
+            safe_mm=args.safe_mm,
+            min_dpi=args.min_dpi,
+            visual_bleed=not args.no_visual_bleed,
+        )
+        for p in pdf_paths
+    ]
+
+    # Compute batch consistency checks across the series
+    pdf_versions = sorted(set(r["pdf_version"] for r in reports))
+    trim_sizes = sorted(set(tuple(r["pages"][0]["trim_size_mm"]) for r in reports if r["pages"]))
+    bleed_sizes = sorted(set(tuple(r["pages"][0]["bleed_size_mm"]) for r in reports if r["pages"]))
+    outlined_states = sorted(set(r["pages"][0]["text_outlined"] for r in reports if r["pages"]))
+    clipped_bleed_files = [
+        r["filename"]
+        for r in reports
+        if any(pg.get("visual_bleed_check", {}).get("empty_white_bleed_suspected") for pg in r["pages"])
+    ]
+    low_dpi_files = [
+        r["filename"]
+        for r in reports
+        if any(len(pg["low_dpi_images"]) > 0 for pg in r["pages"])
+    ]
+    non_cmyk_files = [
+        r["filename"]
+        for r in reports
+        if any(len(pg["non_cmyk_images"]) > 0 or pg["vector_rgb_fills_count"] > 0 for pg in r["pages"])
+    ]
+    ai_priv_files = [r["filename"] for r in reports if r["has_ai_private_data"]]
+
+    batch_report = {
+        "batch_count": len(reports),
+        "batch_consistency": {
+            "pdf_versions_found": pdf_versions,
+            "pdf_version_consistent": len(pdf_versions) == 1,
+            "trim_sizes_mm_found": [list(t) for t in trim_sizes],
+            "trim_size_consistent": len(trim_sizes) == 1,
+            "bleed_sizes_mm_found": [list(b) for b in bleed_sizes],
+            "bleed_size_consistent": len(bleed_sizes) == 1,
+            "text_outlined_states": outlined_states,
+            "files_with_suspected_white_clipped_bleed": clipped_bleed_files,
+            "files_with_low_dpi_images": low_dpi_files,
+            "files_with_non_cmyk_or_rgb": non_cmyk_files,
+            "files_with_ai_private_editing_data": ai_priv_files,
+        },
+        "files": reports,
+    }
+    print(json.dumps(batch_report, ensure_ascii=False, indent=2))
 
 
 def cmd_uv_align(args):
@@ -208,7 +364,6 @@ def cmd_uv_align(args):
         for idx, d in enumerate(u_drawings):
             r = d["rect"]
             in_trim = (d.get("fill") is not None) and trim.contains(r)
-            # Find closest matching vector rect in CMYK page
             min_diff = None
             for cr in c_rects:
                 diff = max(
@@ -244,17 +399,19 @@ def cmd_uv_align(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
-def compare_two_pages(p_a, p_b, dpi=100):
-    pix_a = p_a.get_pixmap(dpi=dpi)
-    pix_b = p_b.get_pixmap(dpi=dpi)
+def compare_two_pages(p_a, p_b, dpi=100, clip_trimbox=False):
+    pix_a = p_a.get_pixmap(dpi=dpi, clip=p_a.trimbox if clip_trimbox else None)
+    pix_b = p_b.get_pixmap(dpi=dpi, clip=p_b.trimbox if clip_trimbox else None)
     im_a = Image.frombytes("RGB", [pix_a.width, pix_a.height], pix_a.samples)
     im_b = Image.frombytes("RGB", [pix_b.width, pix_b.height], pix_b.samples)
-    if im_a.size != im_b.size:
+    size_mismatch = (im_a.size != im_b.size)
+    if size_mismatch:
         im_b = im_b.resize(im_a.size)
     arr_a = np.array(im_a, dtype=int)
     arr_b = np.array(im_b, dtype=int)
     diff = np.abs(arr_a - arr_b)
     return {
+        "size_mismatch": size_mismatch,
         "mean_diff": round(float(diff.mean()), 2),
         "max_diff": int(diff.max()),
         "pct_pixels_over_50": round(float((diff > 50).any(axis=2).mean() * 100.0), 3),
@@ -267,12 +424,13 @@ def cmd_diff_pdfs(args):
     res = {
         "pdf_a": os.path.abspath(args.pdf_a),
         "pdf_b": os.path.abspath(args.pdf_b),
+        "clip_trimbox": args.clip_trimbox,
         "pages_a": len(doc_a),
         "pages_b": len(doc_b),
         "comparisons": [],
     }
     for i in range(min(len(doc_a), len(doc_b))):
-        stats = compare_two_pages(doc_a[i], doc_b[i], dpi=args.dpi)
+        stats = compare_two_pages(doc_a[i], doc_b[i], dpi=args.dpi, clip_trimbox=args.clip_trimbox)
         stats["page"] = i + 1
         res["comparisons"].append(stats)
     print(json.dumps(res, ensure_ascii=False, indent=2))
@@ -301,7 +459,7 @@ def cmd_diff_split(args):
         for all_idx, src_type, src_idx in mapping:
             p_all = doc_all[all_idx]
             p_src = doc_cov[src_idx] if src_type == "cover" else doc_in[src_idx]
-            stats = compare_two_pages(p_all, p_src, dpi=100)
+            stats = compare_two_pages(p_all, p_src, dpi=100, clip_trimbox=args.clip_trimbox)
             if stats["mean_diff"] > 1.0 or stats["pct_pixels_over_50"] > 0.1:
                 res["mismatches"].append(
                     {
@@ -319,7 +477,6 @@ def cmd_match_pages(args):
     doc_rip = fitz.open(args.rip_cover)
     doc_src = fitz.open(args.source_cover)
 
-    # Render source cover pages as reference thumbnails
     src_thumbs = {}
     for i, p in enumerate(doc_src):
         pix = p.get_pixmap(dpi=72)
@@ -331,7 +488,6 @@ def cmd_match_pages(args):
         pix = r_page.get_pixmap(dpi=72)
         im = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         w, h = im.size
-        # Top spread (upper half of 2-up sheet or full 1-up spread):
         y_end = h // 2 if args.two_up else h
         halves = {
             "Left Half": im.crop((int(w * 0.04), int(y_end * 0.08), int(w * 0.48), int(y_end * 0.92))),
@@ -373,7 +529,6 @@ def cmd_uv_overlay(args):
         arr_c = np.array(im_c)
         arr_u = np.array(im_u)
 
-        # Dark pixels in UV plate represent 100% K spot varnish
         uv_mask = (arr_u < 120).any(axis=2)
 
         overlay = arr_c.copy()
@@ -383,7 +538,6 @@ def cmd_uv_overlay(args):
         mask_pad = np.zeros((arr_c.shape[0], arr_c.shape[1]), dtype=bool)
         mask_pad[:h_min, :w_min] = uv_mask[:h_min, :w_min]
 
-        # Highlight UV areas in glowing magenta
         overlay[mask_pad, 0] = np.clip(overlay[mask_pad, 0].astype(int) + 160, 0, 255)
         overlay[mask_pad, 1] = np.clip(overlay[mask_pad, 1].astype(int) // 3, 0, 255)
         overlay[mask_pad, 2] = np.clip(overlay[mask_pad, 2].astype(int) + 160, 0, 255)
@@ -401,13 +555,14 @@ def cmd_uv_overlay(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Deterministic Print & Prepress DTP Probe")
+    parser = argparse.ArgumentParser(description="Deterministic Print & Prepress DTP Probe (v1.1)")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_ins = sub.add_parser("inspect", help="Inspect PDF geometry, bleeds, fonts, DPI, and safe margins")
-    p_ins.add_argument("pdf", help="Path to PDF file")
+    p_ins = sub.add_parser("inspect", help="Inspect one or more PDFs (or a folder) for prepress health & batch consistency")
+    p_ins.add_argument("targets", nargs="+", help="PDF file path(s), glob pattern, or directory containing PDFs")
     p_ins.add_argument("--safe-mm", type=float, default=3.5, help="Safe margin inside TrimBox in mm (default: 3.5)")
     p_ins.add_argument("--min-dpi", type=float, default=250.0, help="Minimum effective image DPI threshold (default: 250)")
+    p_ins.add_argument("--no-visual-bleed", action="store_true", help="Skip raster pixel sampling outside TrimBox")
     p_ins.set_defaults(func=cmd_inspect)
 
     p_uv = sub.add_parser("uv-align", help="Compare vector coordinates between CMYK PDF and UV mask PDF")
@@ -419,12 +574,14 @@ def main():
     p_diff.add_argument("pdf_a", help="First PDF file")
     p_diff.add_argument("pdf_b", help="Second PDF file")
     p_diff.add_argument("--dpi", type=int, default=100, help="Comparison render DPI (default: 100)")
+    p_diff.add_argument("--clip-trimbox", action="store_true", help="Clip both pages to TrimBox before comparing (ignores crop marks/slugs)")
     p_diff.set_defaults(func=cmd_diff_pdfs)
 
     p_split = sub.add_parser("diff-split", help="Verify combined wszystko.pdf matches cover + inside PDFs")
     p_split.add_argument("cover", help="Cover PDF (4 pages)")
     p_split.add_argument("inside", help="Inside body PDF (N pages)")
     p_split.add_argument("combined", help="Combined PDF (N+4 pages)")
+    p_split.add_argument("--clip-trimbox", action="store_true", help="Clip pages to TrimBox before comparing")
     p_split.set_defaults(func=cmd_diff_split)
 
     p_match = sub.add_parser("match-pages", help="Match imposed RIP spread halves against source cover pages")

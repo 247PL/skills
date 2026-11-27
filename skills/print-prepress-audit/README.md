@@ -47,19 +47,22 @@ Clone or link this folder into your agent's skills directory:
 ## Quick CLI Usage (`scripts/prepress_probe.py`)
 
 ```bash
-# 1. Inspect page boxes, bleeds (mm), fonts, image DPI/CMYK, and safe-margin collisions
-python scripts/prepress_probe.py inspect katalog_srodek.pdf --safe-mm 3.5 --min-dpi 250
+# 1. Inspect a single PDF or an entire folder (boxes, visual pixel bleed, DPI, OutputIntents, K100/RGB, batch consistency)
+python scripts/prepress_probe.py inspect PDF_druk/ --safe-mm 3.5 --min-dpi 250
 
 # 2. Verify exact vector alignment (0.0000 pt) between CMYK cover and spot UV mask
 python scripts/prepress_probe.py uv-align katalog_okladka.pdf katalog_okladka_UV.pdf
 
-# 3. Verify combined preview PDF matches split cover + inside PDFs 1:1
+# 3. Compare two PDFs ignoring crop marks/slugs (e.g. production PDF vs preview PDF)
+python scripts/prepress_probe.py diff-pdfs "PDF_druk/slot-wkladki 1.pdf" "gfx/wkladki-v02/PDF/slot-wkladki 1.pdf" --clip-trimbox
+
+# 4. Verify combined preview PDF matches split cover + inside PDFs 1:1
 python scripts/prepress_probe.py diff-split katalog_okladka.pdf katalog_srodek.pdf katalog_wszystko.pdf
 
-# 4. Match imposed 2-up RIP cover sheet halves against 4-page source cover
+# 5. Match imposed 2-up RIP cover sheet halves against 4-page source cover
 python scripts/prepress_probe.py match-pages "rip/screen-RIP___okladka.pdf" katalog_okladka.pdf --two-up
 
-# 5. Generate a visual magenta UV-on-CMYK registration overlay PDF
+# 6. Generate a visual magenta UV-on-CMYK registration overlay PDF
 python scripts/prepress_probe.py uv-overlay "rip/screen-RIP___okladka.pdf" "rip/okladka_LAKIER_UV.pdf" "rip/PODGLAD_PASOWANIA_LAKIERU_UV.pdf"
 ```
 

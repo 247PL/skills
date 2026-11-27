@@ -8,7 +8,8 @@ Use every applicable category below during **`preflight`**, **`post-rip`**, and 
 
 - **File Timestamp & Active Directory Verification**:
   - Verify you are auditing the active working folder (e.g. active Syncthing/production directory rather than an outdated backup copy) and log exact file modification timestamps and byte sizes.
-  - When auditing multi-variant sets (e.g. leaflets `v01..v04` or packaging variants `1A, 1B, 2A, 2B`), flag any file whose timestamp did not change since the previous round.
+  - Compare production PDF timestamps against source working files (`.ai`, `.indd`, `.vectorcraft`) in the project directory—flag immediately if print PDFs predate the latest source save.
+  - When auditing multi-variant sets (e.g. calendar inserts `1..8`, leaflets `v01..v04`, or packaging variants `1A..2B`), run `prepress_probe.py inspect <folder>` to check `batch_consistency` (flagging mismatched PDF versions such as PDF 1.7 vs PDF 1.4, inconsistent `BleedBox` sizes, or files that were not re-exported).
 - **Page Count & Binding Math**:
   - **Saddle-Stitch (*Oprawa zeszytowa*)**: Total inside pages (`srodek`) + 4 cover pages (`okladka`) must be divisible by `4`. If `srodek` has 42 or 43 pages, flag the binding error immediately and look for accidental blank or duplicated pages.
   - **Perfect Binding (*Oprawa klejona*)**: Check spine width allowance on the cover spread and confirm page count matches the print house quote.

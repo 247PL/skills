@@ -24,11 +24,11 @@ Select the mode that matches the stage of production. Default to **`preflight`**
 
 ### 1. Preflight Mode (`preflight`) — *Default*
 Complete pre-press audit before sending files to the print house:
+- **Source Timestamp & Batch Consistency**: Compare PDF modification timestamps against source design files (`.ai`, `.indd`, `.vectorcraft`) in the project tree—warn immediately if print PDFs are older than the latest source save. For multi-file series (e.g. `slot-wkladki 1..8.pdf` or leaflets `v01..v04.pdf`), run `inspect <folder>` to catch series-level inconsistencies (e.g. one file saved as PDF 1.7 while others are PDF 1.4, or mismatched `BleedBox` sizes).
 - **Structure & Binding Math**: Verify page counts across split files (`okladka.pdf` + `srodek.pdf` vs combined `wszystko.pdf`), check divisibility by 4 for saddle-stitch (*oprawa zeszytowa*) or signature requirements for perfect binding (*oprawa klejona*), and scan for accidental duplicate or missing pages.
-- **Page Boxes & Bleeds**: Inspect `TrimBox`, `BleedBox`, `CropBox`, and `MediaBox` in millimeters ($1\text{ pt} = 25.4 / 72\text{ mm}$). Confirm uniform bleed (typically $3\text{ mm}$ or $5\text{ mm}$) and verify that background artwork actually extends to the `BleedBox` edge.
-- **Safe Zone & Margin Collisions**: Flag text, folios (page numbers), tables, or logos positioned closer than $3\text{–}5\text{ mm}$ to the `TrimBox` edge or spine fold.
+- **Page Boxes, Physical Bleed & Safe Margins**: Inspect `TrimBox`, `BleedBox`, `CropBox`, and `MediaBox` in millimeters ($1\text{ pt} = 25.4 / 72\text{ mm}$). Confirm uniform bleed ($2\text{ mm}$, $3\text{ mm}$, or $5\text{ mm}$ per print house spec) and run the **visual pixel bleed check** (`visual_bleed_check` in `prepress_probe.py inspect`) to verify artwork actually extends outside `TrimBox` instead of being clipped to white by a `0 mm` export bleed mask. Flag text, folios, tables, or logos closer than $3\text{–}5\text{ mm}$ to `TrimBox`.
 - **Spot Finishes (`UV`, `Spot White`, `Die-Cut`)**: Verify vector alignment ($0.0000\text{ pt}$ tolerance) between the spot mask PDF (`*_UV.pdf`) and the CMYK artwork PDF, confirm $100\%\text{ K}$ (`0 0 0 1 k`) or proper `/Separation` channel usage, inspect knockouts (*wybrania*), and confirm inside covers (pp. II & III) are clean when only outside covers receive varnish.
-- **Color, Effective DPI, AI Assets & Fonts**: Check embedded images for effective resolution ($\ge 250\text{–}300\text{ DPI}$) and `DeviceCMYK` color space, inspect AI-generated/composited images for artifacts, and verify all fonts are embedded or outlined.
+- **Color, OutputIntents, AI Private Data, Effective DPI & Outlined Text**: Check embedded images for effective resolution ($\ge 250\text{–}300\text{ DPI}$) and `DeviceCMYK` color space, verify `has_output_intent` (PDF/X vs plain PDF 1.4/1.7), check vector `K100` (`0 0 0 1 k`) vs stray `RGB` fills (`rg`), flag bloated `Preserve Illustrator Editing Capabilities` (`/PieceInfo`) data in print deliverables, and verify font embedding. When `text_outlined: true` (`Fonts = 0`, `text_length = 0`), explicitly tell the user that text proofreading and text-box margin checks cannot run on the outlined PDF layer and offer to check a parallel live-text working file (`.ai` / preview PDF) or visual render instead.
 - **Editorial, TOC & Typography**: Cross-check Table of Contents (*Spis treści*) titles, casing, and page numbers against body headings; compare against source `.docx`/`.md` copy if provided; apply regional DTP rules (e.g. [references/regional/pl-dtp.md](./references/regional/pl-dtp.md)).
 
 ### 2. Post-RIP & Imposition Mode (`post-rip`)
@@ -43,7 +43,7 @@ Final sign-off audit of proofs returned by the print house (`do akceptacji po ri
 Verification of DTP fixes after an earlier audit round:
 - **Timestamp & File Sync Check**: Check modification timestamps across all deliverables (`okladka`, `srodek`, `wszystko`, `UV`, or multi-variant leaflets `v01..v04`) to immediately spot files that were not re-exported.
 - **Delta Verification**: Re-test every prior finding and classify as `FIXED`, `OPEN`, `PARTIAL`, or `REGRESSION`.
-- **Full-File Synchronization**: Confirm that fixes applied to `srodek.pdf` or `okladka.pdf` were also propagated to the combined `wszystko.pdf` (and vice versa) via pixel-diff verification.
+- **Full-File Synchronization**: Confirm that fixes applied to `srodek.pdf` or `okladka.pdf` were also propagated to the combined `wszystko.pdf` (and vice versa) via pixel-diff verification. Use `diff-pdfs --clip-trimbox` whenever comparing a production PDF with crop marks/slugs against a clean preview PDF without marks.
 
 ## Execution Workflow
 

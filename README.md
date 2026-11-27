@@ -13,7 +13,9 @@ Open-source AI agent skills maintained by **247PL**, built on the open `SKILL.md
 *(Coming soon)*
 
 ### Graphics
-*(Coming soon)*
+| Skill | Description | Install |
+| :--- | :--- | :--- |
+| **[`print-prepress-audit`](./skills/print-prepress-audit/)** | Deterministic DTP, prepress, post-RIP imposition, spot-finish (`Lakier UV`, `Spot White`, die-cut), and editorial/typographic quality audit for print-ready PDFs (catalogs, brochures, leaflets, calendars, posters, labels, packaging) with PyMuPDF vector/raster probes and visual UV-on-CMYK overlay generation. | `npx skills add 247PL/skills --skill print-prepress-audit` |
 
 ## Installation
 
